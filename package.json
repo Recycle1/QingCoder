@@ -1,0 +1,82 @@
+{
+  "name": "qingcoder",
+  "displayName": "QingCoder",
+  "description": "Cursor-like AI coding assistant: chat, MCP, multi-provider tokens, Agent modes, local sessions.",
+  "version": "0.1.0",
+  "publisher": "qingcoder",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:qingcoder.chatView"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qingcoder",
+          "title": "QingCoder",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "qingcoder": [
+        {
+          "type": "webview",
+          "id": "qingcoder.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "qingcoder.openChat",
+        "title": "QingCoder: Open Chat"
+      },
+      {
+        "command": "qingcoder.keepAll",
+        "title": "QingCoder: Keep All"
+      },
+      {
+        "command": "qingcoder.undoAll",
+        "title": "QingCoder: Undo All"
+      },
+      {
+        "command": "qingcoder.reviewChanges",
+        "title": "QingCoder: Review Changes"
+      },
+      {
+        "command": "qingcoder.keepFile",
+        "title": "QingCoder: Keep File"
+      },
+      {
+        "command": "qingcoder.undoFile",
+        "title": "QingCoder: Undo File"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/diff": "^5.2.3",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "diff": "^5.2.0"
+  }
+}

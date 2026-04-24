@@ -43,11 +43,36 @@ export type ChatMessageDto = {
   >;
 };
 
+/** Agent 回合内工具执行等活动，用于 Webview「执行过程」面板 */
+export type AgentActivityKind =
+  | 'tools_detected'
+  | 'tool_running'
+  | 'tool_done'
+  | 'followup_model';
+
+export type AgentActivityItem = {
+  id: string;
+  at: number;
+  kind: AgentActivityKind;
+  toolName?: string;
+  detail?: string;
+  ok?: boolean;
+};
+
+/** 待确认批次中单个文件相对批次开始时的增删行数 */
+export type PendingFileLineStat = {
+  path: string;
+  added: number;
+  removed: number;
+};
+
 export type HostToWebview =
   | { type: 'state'; payload: UiState }
   | { type: 'sessionMessages'; sessionId: string; messages: ChatMessageDto[] }
   | { type: 'stream'; sessionId: string; id: string; delta: string }
   | { type: 'streamEnd'; sessionId: string; id: string }
+  | { type: 'agentActivityClear'; sessionId: string }
+  | { type: 'agentActivity'; sessionId: string; item: AgentActivityItem }
   | { type: 'error'; message: string }
   | { type: 'toast'; message: string };
 
@@ -64,7 +89,7 @@ export type UiState = {
   /** 每个档案是否已在 SecretStorage 配置 Token（界面不返回明文） */
   tokenConfigured: Record<string, boolean>;
   mcp: { loadedPath: string | null; serverCount: number; lastError?: string };
-  pending: { hasBatch: boolean; files: string[] };
+  pending: { hasBatch: boolean; files: PendingFileLineStat[] };
   /** 扩展侧是否正在流式生成（用于显示停止按钮） */
   isStreaming: boolean;
   /** 会话历史侧栏是否展开 */

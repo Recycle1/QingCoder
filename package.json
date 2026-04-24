@@ -79,6 +79,7 @@
   },
   "devDependencies": {
     "@types/diff": "^5.2.3",
+    "@types/dompurify": "^3.0.5",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^2.22.0",
@@ -87,6 +88,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",
-    "diff": "^5.2.0"
+    "diff": "^5.2.0",
+    "dompurify": "^3.4.1",
+    "marked": "^18.0.2"
   }
 }

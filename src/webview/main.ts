@@ -1,4 +1,12 @@
-import type { HostToWebview, WebviewToHost, UiState, AgentMode, ChatMessageDto } from '../types/protocol';
+import type {
+  HostToWebview,
+  WebviewToHost,
+  UiState,
+  AgentMode,
+  ChatMessageDto,
+  AgentActivityItem,
+} from '../types/protocol';
+import { renderAssistantMarkdown } from './renderMarkdown';
 
 declare function acquireVsCodeApi(): { postMessage(msg: WebviewToHost): void };
 
@@ -7,6 +15,9 @@ const vscode = acquireVsCodeApi();
 type LocalState = {
   ui: UiState | null;
   messagesBySession: Record<string, ChatMessageDto[]>;
+  agentActivityBySession: Record<string, AgentActivityItem[]>;
+  /** 输入框上方「执行与改动」折叠区是否展开 */
+  agentFoldOpen: boolean;
   draft: string;
   streaming: { sessionId: string; id: string; buf: string } | null;
 };
@@ -14,6 +25,8 @@ type LocalState = {
 const st: LocalState = {
   ui: null,
   messagesBySession: {},
+  agentActivityBySession: {},
+  agentFoldOpen: false,
   draft: '',
   streaming: null,
 };
@@ -43,6 +56,21 @@ function btn(label: string, onClick: () => void, title?: string) {
 }
 
 /** 聊天区滚到最新（双帧等待布局后再滚，避免卡在顶部） */
+function formatAgentRow(item: AgentActivityItem): string {
+  switch (item.kind) {
+    case 'tools_detected':
+      return item.detail ?? '检测到工具调用';
+    case 'tool_running':
+      return `运行 ${item.toolName ?? 'tool'}${item.detail ? ` · ${item.detail}` : ''}`;
+    case 'tool_done':
+      return `${item.ok === false ? '失败' : '完成'} ${item.toolName ?? 'tool'}${item.detail ? ` · ${item.detail}` : ''}`;
+    case 'followup_model':
+      return item.detail ?? '模型后续步骤';
+    default:
+      return item.detail ?? '';
+  }
+}
+
 function scrollChatToBottom() {
   requestAnimationFrame(() => {
     const el = document.querySelector('.qc-chat');
@@ -94,7 +122,11 @@ function render() {
   const p = st.ui?.pending;
   if (p?.hasBatch) {
     pendingStrip.appendChild(
-      el('span', 'qc-pending-text', `待确认 ${p.files.length} 个文件 · ` + p.files.map((f) => f.split(/[/\\]/).pop()).join(', '))
+      el(
+        'span',
+        'qc-pending-text',
+        `待确认 ${p.files.length} 个文件 · ` + p.files.map((f) => (f.path.split(/[/\\]/).pop() ?? f.path)).join(', ')
+      )
     );
     const actions = el('span', 'qc-pending-actions');
     actions.appendChild(btn('Keep All', () => vscode.postMessage({ type: 'keepAll' })));
@@ -107,12 +139,26 @@ function render() {
   }
   main.appendChild(pendingStrip);
 
-  const chat = el('div', 'qc-chat');
   const sid = st.ui?.activeSessionId;
+  const act = sid ? st.agentActivityBySession[sid] ?? [] : [];
+
+  const chat = el('div', 'qc-chat');
   const msgs = sid ? st.messagesBySession[sid] ?? [] : [];
   for (const m of msgs) {
     const bubble = el('div', 'qc-msg qc-msg-' + m.role);
-    bubble.textContent = m.parts.map((x) => (x.type === 'text' ? x.text : '[image]')).join('\n');
+    const text = m.parts.map((x) => (x.type === 'text' ? x.text : '[image]')).join('\n');
+    if (m.role === 'assistant') {
+      const streamingThis = st.streaming?.sessionId === sid && st.streaming?.id === m.id;
+      if (streamingThis) {
+        bubble.classList.add('qc-msg-streaming');
+        bubble.textContent = text;
+      } else {
+        bubble.classList.add('qc-msg-md');
+        bubble.innerHTML = renderAssistantMarkdown(text);
+      }
+    } else {
+      bubble.textContent = text;
+    }
     chat.appendChild(bubble);
   }
   main.appendChild(chat);
@@ -176,6 +222,61 @@ function render() {
   toolbar.appendChild(el('span', 'qc-token-badge', `Token ${nOk}/${profs.length}`));
 
   main.appendChild(toolbar);
+
+  const pendingStats = p?.hasBatch && p.files.length > 0 ? p.files : [];
+  const showComposeFold = act.length > 0 || pendingStats.length > 0;
+  if (showComposeFold) {
+    const fold = el('div', 'qc-compose-fold' + (st.agentFoldOpen ? ' qc-compose-fold--open' : ''));
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'qc-compose-fold-head';
+    head.onclick = () => {
+      st.agentFoldOpen = !st.agentFoldOpen;
+      render();
+    };
+    const chev = el('span', 'qc-compose-fold-chev', st.agentFoldOpen ? '▼' : '▶');
+    head.appendChild(chev);
+    const titleBits: string[] = [];
+    if (act.length) titleBits.push(`执行 ${act.length} 步`);
+    if (pendingStats.length) titleBits.push(`${pendingStats.length} 个文件待确认`);
+    head.appendChild(el('span', 'qc-compose-fold-title', titleBits.join(' · ') || '详情'));
+    if (pendingStats.length) {
+      const sumA = pendingStats.reduce((s, f) => s + f.added, 0);
+      const sumR = pendingStats.reduce((s, f) => s + f.removed, 0);
+      const wrap = el('span', 'qc-compose-fold-stats');
+      wrap.appendChild(el('span', 'qc-line-add', `+${sumA}`));
+      wrap.appendChild(document.createTextNode(' '));
+      wrap.appendChild(el('span', 'qc-line-del', `−${sumR}`));
+      head.appendChild(wrap);
+    }
+    fold.appendChild(head);
+
+    if (st.agentFoldOpen) {
+      const body = el('div', 'qc-compose-fold-body');
+      if (act.length) {
+        body.appendChild(el('div', 'qc-compose-fold-subhead', '执行过程'));
+        for (const item of act) {
+          const row = el('div', 'qc-agent-row qc-agent-row-' + item.kind);
+          row.textContent = formatAgentRow(item);
+          body.appendChild(row);
+        }
+      }
+      if (pendingStats.length) {
+        body.appendChild(el('div', 'qc-compose-fold-subhead', '待确认文件'));
+        for (const f of pendingStats) {
+          const row = el('div', 'qc-pending-file-row');
+          const short = f.path.split(/[/\\]/).pop() ?? f.path;
+          row.appendChild(el('span', 'qc-pending-file-name', short));
+          row.appendChild(el('span', 'qc-line-add', `+${f.added}`));
+          row.appendChild(document.createTextNode(' '));
+          row.appendChild(el('span', 'qc-line-del', `−${f.removed}`));
+          body.appendChild(row);
+        }
+      }
+      fold.appendChild(body);
+    }
+    main.appendChild(fold);
+  }
 
   const ta = document.createElement('textarea');
   ta.className = 'qc-input';
@@ -251,6 +352,16 @@ window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
     render();
     scrollChatToBottom();
   }
+  if (msg.type === 'agentActivityClear') {
+    st.agentActivityBySession[msg.sessionId] = [];
+    render();
+  }
+  if (msg.type === 'agentActivity') {
+    const arr = (st.agentActivityBySession[msg.sessionId] ??= []);
+    arr.push(msg.item);
+    render();
+    scrollChatToBottom();
+  }
   if (msg.type === 'error') {
     alert(msg.message);
   }
@@ -278,8 +389,40 @@ const css = `
 .qc-pending-strip--idle { opacity:0.85;}
 .qc-pending-text { flex:1; min-width:120px; }
 .qc-pending-actions { display:flex; flex-wrap:wrap; gap:4px;}
+.qc-compose-fold { flex-shrink:0; border-top:1px solid var(--vscode-widget-border); border-bottom:1px solid var(--vscode-widget-border); background: var(--vscode-sideBar-background); font-size:11px;}
+.qc-compose-fold-head { width:100%; box-sizing:border-box; display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; padding:6px 10px; margin:0; border:none; cursor:pointer; text-align:left; color: inherit; background: transparent; font: inherit;}
+.qc-compose-fold-head:hover { background: var(--vscode-list-hoverBackground);}
+.qc-compose-fold-chev { flex-shrink:0; width:1em; opacity:0.85;}
+.qc-compose-fold-title { flex:1; min-width:100px; opacity:0.95;}
+.qc-compose-fold-stats { flex-shrink:0; font-family: var(--vscode-editor-font-family); font-variant-numeric: tabular-nums;}
+.qc-compose-fold-body { max-height:160px; overflow:auto; padding:6px 10px 8px; display:flex; flex-direction:column; gap:4px; border-top:1px solid var(--vscode-widget-border); background: var(--vscode-editor-background);}
+.qc-compose-fold-subhead { font-weight:600; font-size:10px; opacity:0.85; margin-top:4px;}
+.qc-compose-fold-subhead:first-child { margin-top:0;}
+.qc-agent-row { font-family: var(--vscode-editor-font-family); line-height:1.35; opacity:0.92; border-left:2px solid var(--vscode-input-border); padding-left:6px;}
+.qc-agent-row-tool_running { border-left-color: var(--vscode-progressBar-background);}
+.qc-agent-row-tool_done { border-left-color: var(--vscode-testing-iconPassed);}
+.qc-agent-row-followup_model { border-left-color: var(--vscode-textLink-foreground);}
+.qc-pending-file-row { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-family: var(--vscode-editor-font-family); line-height:1.4;}
+.qc-pending-file-name { flex:1; min-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.qc-line-add { color: var(--vscode-gitDecoration-addedResourceForeground); font-weight:500;}
+.qc-line-del { color: var(--vscode-gitDecoration-deletedResourceForeground); font-weight:500;}
 .qc-chat { flex:1; min-height:0; overflow:auto; overflow-anchor:none; padding:10px; display:flex; flex-direction:column; gap:10px;}
-.qc-msg { padding:10px 12px; border-radius:8px; max-width:92%; white-space:pre-wrap; line-height:1.45;}
+.qc-msg { padding:10px 12px; border-radius:8px; max-width:92%; line-height:1.45;}
+.qc-msg-streaming { white-space:pre-wrap;}
+.qc-msg-md { white-space:normal; word-break:break-word;}
+.qc-msg-md .qc-md-empty { opacity:0.7; font-style:italic;}
+.qc-msg-md p { margin:0.4em 0;}
+.qc-msg-md p:first-child { margin-top:0;}
+.qc-msg-md p:last-child { margin-bottom:0;}
+.qc-msg-md pre { margin:0.5em 0; padding:8px; overflow:auto; max-width:100%; background: var(--vscode-textCodeBlock-background); border-radius:4px; font-family: var(--vscode-editor-font-family); font-size:11px;}
+.qc-msg-md code { font-family: var(--vscode-editor-font-family); font-size:0.92em; background: var(--vscode-textPreformat-background); padding:0.1em 0.35em; border-radius:3px;}
+.qc-msg-md pre code { padding:0; background:transparent;}
+.qc-msg-md ul, .qc-msg-md ol { margin:0.35em 0 0.35em 1.2em; padding:0;}
+.qc-msg-md blockquote { margin:0.4em 0; padding-left:8px; border-left:3px solid var(--vscode-widget-border); opacity:0.95;}
+.qc-msg-md a { color: var(--vscode-textLink-foreground);}
+.qc-msg-md h1, .qc-msg-md h2, .qc-msg-md h3 { font-size:1.05em; margin:0.5em 0 0.25em; font-weight:600;}
+.qc-msg-md table { border-collapse:collapse; font-size:11px; margin:0.5em 0;}
+.qc-msg-md th, .qc-msg-md td { border:1px solid var(--vscode-widget-border); padding:4px 6px;}
 .qc-msg-user { align-self:flex-end; background: var(--vscode-input-background); border:1px solid var(--vscode-input-border);}
 .qc-msg-assistant { align-self:flex-start; background: var(--vscode-editor-inactiveSelectionBackground);}
 .qc-toolbar { flex-shrink:0; display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; padding:8px; border-top:1px solid var(--vscode-widget-border); border-bottom:1px solid var(--vscode-widget-border); background: var(--vscode-sideBar-background);}

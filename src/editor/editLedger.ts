@@ -102,6 +102,29 @@ export class EditLedger {
     }
     await openReviewDiffs(this.snapshots, pairs);
   }
+
+  /** 当前待确认批次各文件相对写入前基线的增删行数（读磁盘当前内容） */
+  async getPendingLineStats(): Promise<{ path: string; added: number; removed: number }[]> {
+    if (!this.current) return [];
+    const dec = new TextDecoder();
+    const out: { path: string; added: number; removed: number }[] = [];
+    for (const [fsPath, oldText] of this.current.files) {
+      let newText = '';
+      try {
+        newText = dec.decode(await vscode.workspace.fs.readFile(vscode.Uri.file(fsPath)));
+      } catch {
+        try {
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
+          newText = doc.getText();
+        } catch {
+          newText = '';
+        }
+      }
+      const { added, removed } = countLineDelta(oldText, newText);
+      out.push({ path: fsPath, added, removed });
+    }
+    return out;
+  }
 }
 
 /** 计算新增行号（1-based），用于绿色高亮 */
@@ -119,4 +142,17 @@ export function computeAddedLineNumbers(oldText: string, newText: string): numbe
     }
   }
   return added;
+}
+
+/** 按行粒度统计增删行数（与 diffLines 一致） */
+export function countLineDelta(oldText: string, newText: string): { added: number; removed: number } {
+  const parts = diffLines(oldText, newText);
+  let added = 0;
+  let removed = 0;
+  for (const p of parts) {
+    const n = typeof p.count === 'number' ? p.count : p.value ? p.value.split('\n').length : 0;
+    if (p.added) added += n;
+    else if (p.removed) removed += n;
+  }
+  return { added, removed };
 }

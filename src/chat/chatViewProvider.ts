@@ -142,6 +142,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         availableModels = [selectedModel, ...availableModels];
       }
     }
+    const pendingFiles = this.ledger.hasPending() ? await this.ledger.getPendingLineStats() : [];
     const st: UiState = {
       sessions: sums.map((s) => ({
         id: s.id,
@@ -163,7 +164,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       },
       pending: {
         hasBatch: this.ledger.hasPending(),
-        files: this.ledger.getPendingFiles(),
+        files: pendingFiles,
       },
       isStreaming: this.streamingActive,
       sidebarOpen: this.settings.getChatSidebarOpen(),
@@ -432,6 +433,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.streamingActive = true;
     void this.postState();
 
+    this.post({ type: 'agentActivityClear', sessionId });
+
     const apiHistory = this.buildApiHistory(rec.messages.slice(0, -1));
 
     const modelId = this.settings.getModelIdForProfile(profile.id, profile.defaultModel);
@@ -447,10 +450,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     let buf = '';
     try {
-      const out = await runAgentTurn(deps, apiHistory, this.abort.signal, (d) => {
-        buf += d;
-        this.post({ type: 'stream', sessionId, id: assistantId, delta: d });
-      });
+      const out = await runAgentTurn(
+        deps,
+        apiHistory,
+        this.abort.signal,
+        (d) => {
+          buf += d;
+          this.post({ type: 'stream', sessionId, id: assistantId, delta: d });
+        },
+        (item) => this.post({ type: 'agentActivity', sessionId, item })
+      );
       let finalText = out;
       if (this.abort?.signal.aborted && !finalText.includes('已停止')) {
         finalText = `${finalText}${finalText ? '\n\n' : ''}（已停止）`;

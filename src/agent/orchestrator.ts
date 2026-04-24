@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import type { AgentMode } from '../types/protocol';
 import type { ChatMessageApi } from '../llm/openaiCompatible';
 import { streamChatCompletion } from '../llm/openaiCompatible';
@@ -28,15 +27,22 @@ export async function runAgentTurn(
   const messages: ChatMessageApi[] = [{ role: 'system', content: sys }, ...history];
 
   let assistant = '';
-  for await (const d of streamChatCompletion({
-    baseUrl: deps.baseUrl,
-    apiKey: deps.apiKey,
-    model: deps.model,
-    messages,
-    signal,
-  })) {
-    assistant += d;
-    onDelta(d);
+  try {
+    for await (const d of streamChatCompletion({
+      baseUrl: deps.baseUrl,
+      apiKey: deps.apiKey,
+      model: deps.model,
+      messages,
+      signal,
+    })) {
+      assistant += d;
+      onDelta(d);
+    }
+  } catch (e) {
+    if (signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) {
+      return assistant;
+    }
+    throw e;
   }
 
   const { calls } = extractToolCalls(assistant);
@@ -48,6 +54,7 @@ export async function runAgentTurn(
   // 简化 Agent 回路：执行一轮工具后继续一次模型总结（不无限递归）
   const toolOutputs: string[] = [];
   for (const c of allowed) {
+    if (signal.aborted) return assistant;
     const out = await executeTool(c as ToolCall, { root: deps.workspaceRoot, ledger: deps.ledger, mcp: deps.mcp });
     toolOutputs.push(`工具 ${c.name} 输出: ${out}`);
   }
@@ -59,15 +66,22 @@ export async function runAgentTurn(
   ];
 
   let second = '';
-  for await (const d of streamChatCompletion({
-    baseUrl: deps.baseUrl,
-    apiKey: deps.apiKey,
-    model: deps.model,
-    messages: follow,
-    signal,
-  })) {
-    second += d;
-    onDelta(d);
+  try {
+    for await (const d of streamChatCompletion({
+      baseUrl: deps.baseUrl,
+      apiKey: deps.apiKey,
+      model: deps.model,
+      messages: follow,
+      signal,
+    })) {
+      second += d;
+      onDelta(d);
+    }
+  } catch (e) {
+    if (signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) {
+      return `${assistant}\n\n${second}`.trimEnd();
+    }
+    throw e;
   }
   return `${assistant}\n\n${second}`;
 }

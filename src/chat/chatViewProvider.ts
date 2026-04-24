@@ -4,6 +4,8 @@ import { SessionStore, type ChatMessage } from '../core/sessionStore';
 import { SettingsStore } from '../core/settingsStore';
 import { SecretsService } from '../core/secretsService';
 import { getWorkspaceMcpCandidates } from '../core/paths';
+import { resolveModelProfiles } from '../core/profileConfigFile';
+import { modelsForProfile } from '../core/modelCatalog';
 import { loadMcpFromPath, shutdownMcp, type LoadedMcp } from '../mcp/mcpHost';
 import { ChangeHighlighter } from '../editor/highlights';
 import { EditLedger } from '../editor/editLedger';
@@ -12,6 +14,7 @@ import { KeepUndoCodeLensProvider } from '../editor/keepCodeLens';
 import { runAgentTurn } from '../agent/orchestrator';
 import type { ChatMessageApi } from '../llm/openaiCompatible';
 import { routeUserIntent } from '../agent/router';
+import { runTokenCredentialWizard } from '../ui/tokenCredentialFlow';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'qingcoder.chatView';
@@ -25,6 +28,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly ledger: EditLedger;
   private readonly codeLens: KeepUndoCodeLensProvider;
   private abort?: AbortController;
+  private streamingActive = false;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -71,6 +75,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         })
       )
     );
+    ctx.subscriptions.push(
+      vscode.commands.registerCommand('qingcoder.configureToken', async () => {
+        await runTokenCredentialWizard(this.settings, this.secrets);
+        await this.postState();
+      })
+    );
+    ctx.subscriptions.push(
+      vscode.commands.registerCommand('qingcoder.stopGeneration', () => {
+        this.abort?.abort();
+      })
+    );
   }
 
   resolveWebviewView(
@@ -114,7 +129,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async postState() {
     const sums = await this.sessions.listSummaries();
     const activeSessionId = this.settings.getActiveSessionId();
-    const profiles = this.settings.getModelProfiles();
+    const profiles = resolveModelProfiles(this.settings);
+    const tokenConfigured = await this.secrets.getTokenConfiguredMap(profiles.map((p) => p.id));
+    const activePid = this.settings.getActiveProfileId();
+    const activeProf = profiles.find((p) => p.id === activePid) ?? profiles[0];
+    let availableModels: string[] = [];
+    let selectedModel = '';
+    if (activeProf) {
+      selectedModel = this.settings.getModelIdForProfile(activeProf.id, activeProf.defaultModel);
+      availableModels = modelsForProfile(activeProf.id, activeProf.defaultModel);
+      if (selectedModel && !availableModels.includes(selectedModel)) {
+        availableModels = [selectedModel, ...availableModels];
+      }
+    }
     const st: UiState = {
       sessions: sums.map((s) => ({
         id: s.id,
@@ -125,7 +152,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       activeSessionId,
       mode: this.settings.getMode(),
       modelProfiles: profiles,
-      activeProfileId: this.settings.getActiveProfileId(),
+      activeProfileId: activePid,
+      availableModels,
+      selectedModel,
+      tokenConfigured,
       mcp: {
         loadedPath: this.mcpPath,
         serverCount: this.loadedMcp?.clients.size ?? 0,
@@ -135,6 +165,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         hasBatch: this.ledger.hasPending(),
         files: this.ledger.getPendingFiles(),
       },
+      isStreaming: this.streamingActive,
+      sidebarOpen: this.settings.getChatSidebarOpen(),
     };
     this.post({ type: 'state', payload: st });
   }
@@ -181,7 +213,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         case 'saveModelProfile': {
-          const cur = this.settings.getModelProfiles();
+          const cur = resolveModelProfiles(this.settings);
           const others = cur.filter((p) => p.id !== msg.profile.id);
           await this.settings.setModelProfiles([msg.profile, ...others]);
           await this.settings.setActiveProfileId(msg.profile.id);
@@ -190,7 +222,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         case 'saveToken': {
           await this.secrets.setToken(msg.profileId, msg.token);
-          this.post({ type: 'toast', message: '已保存 Token（本地 SecretStorage）' });
+          await this.postState();
+          this.post({ type: 'toast', message: '已保存 Token（本机 SecretStorage，界面仅显示是否已配置）' });
+          return;
+        }
+        case 'clearToken': {
+          await this.secrets.deleteToken(msg.profileId);
+          await this.postState();
+          this.post({ type: 'toast', message: '已清除该档案的 Token' });
+          return;
+        }
+        case 'openTokenWizard': {
+          await runTokenCredentialWizard(this.settings, this.secrets);
+          await this.postState();
+          return;
+        }
+        case 'setModelId': {
+          const pid = this.settings.getActiveProfileId();
+          if (pid) await this.settings.setModelIdForProfile(pid, msg.modelId);
+          await this.postState();
+          return;
+        }
+        case 'setSidebarOpen': {
+          await this.settings.setChatSidebarOpen(msg.open);
+          await this.postState();
+          return;
+        }
+        case 'stopGeneration': {
+          this.abort?.abort();
           return;
         }
         case 'reloadMcp': {
@@ -326,7 +385,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const profileId = this.settings.getActiveProfileId();
-    const profiles = this.settings.getModelProfiles();
+    const profiles = resolveModelProfiles(this.settings);
     const profile = profiles.find((p) => p.id === profileId) ?? profiles[0];
     if (!profile) {
       this.post({ type: 'error', message: '未配置模型档案' });
@@ -370,12 +429,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.abort?.abort();
     this.abort = new AbortController();
+    this.streamingActive = true;
+    void this.postState();
 
     const apiHistory = this.buildApiHistory(rec.messages.slice(0, -1));
 
+    const modelId = this.settings.getModelIdForProfile(profile.id, profile.defaultModel);
     const deps = {
       mode: this.settings.getMode() as AgentMode,
-      model: profile.defaultModel,
+      model: modelId,
       baseUrl: profile.baseUrl,
       apiKey: token,
       workspaceRoot: this.workspaceRoot(),
@@ -385,20 +447,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     let buf = '';
     try {
-      await runAgentTurn(deps, apiHistory, this.abort.signal, (d) => {
+      const out = await runAgentTurn(deps, apiHistory, this.abort.signal, (d) => {
         buf += d;
         this.post({ type: 'stream', sessionId, id: assistantId, delta: d });
       });
-      assistantShell.parts = [{ type: 'text', text: buf }];
+      let finalText = out;
+      if (this.abort?.signal.aborted && !finalText.includes('已停止')) {
+        finalText = `${finalText}${finalText ? '\n\n' : ''}（已停止）`;
+      }
+      assistantShell.parts = [{ type: 'text', text: finalText }];
       await this.sessions.saveSession(rec);
       this.post({ type: 'streamEnd', sessionId, id: assistantId });
       this.codeLens.refresh();
-      await this.postState();
     } catch (e) {
-      const m = e instanceof Error ? e.message : String(e);
-      assistantShell.parts = [{ type: 'text', text: `（错误）${m}` }];
+      const aborted = this.abort?.signal.aborted || (e instanceof DOMException && e.name === 'AbortError');
+      if (aborted) {
+        assistantShell.parts = [{ type: 'text', text: buf ? `${buf}\n\n（已停止）` : '（已停止）' }];
+      } else {
+        const m = e instanceof Error ? e.message : String(e);
+        assistantShell.parts = [{ type: 'text', text: `（错误）${m}` }];
+      }
       await this.sessions.saveSession(rec);
       this.post({ type: 'streamEnd', sessionId, id: assistantId });
+      this.codeLens.refresh();
+    } finally {
+      this.streamingActive = false;
       await this.postState();
     }
   }

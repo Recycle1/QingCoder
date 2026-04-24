@@ -39,7 +39,19 @@ export async function* streamChatCompletion(params: {
   const decoder = new TextDecoder();
   let buf = '';
   while (true) {
-    const { value, done } = await reader.read();
+    if (params.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    let readResult: { done: boolean; value?: Uint8Array };
+    try {
+      readResult = await reader.read();
+    } catch (e) {
+      if (params.signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      throw e;
+    }
+    const { value, done } = readResult;
     if (done) break;
     buf += decoder.decode(value, { stream: true });
     const lines = buf.split('\n');

@@ -32,56 +32,44 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return n;
 }
 
+function btn(label: string, onClick: () => void, title?: string) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'qc-btn';
+  b.textContent = label;
+  if (title) b.title = title;
+  b.onclick = onClick;
+  return b;
+}
+
+/** 聊天区滚到最新（双帧等待布局后再滚，避免卡在顶部） */
+function scrollChatToBottom() {
+  requestAnimationFrame(() => {
+    const el = document.querySelector('.qc-chat');
+    if (el) el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => {
+      const el2 = document.querySelector('.qc-chat');
+      if (el2) el2.scrollTop = el2.scrollHeight;
+    });
+  });
+}
+
 function render() {
   app.innerHTML = '';
   const root = el('div', 'qc-root');
+  const sidebarOpen = st.ui?.sidebarOpen === true;
 
-  const top = el('div', 'qc-top');
-  const pendingBar = el('div', 'qc-pending');
-  const p = st.ui?.pending;
-  if (p?.hasBatch) {
-    pendingBar.appendChild(el('span', 'qc-muted', `待确认文件 (${p.files.length})：`));
-    pendingBar.appendChild(el('span', 'qc-mono', p.files.map((f) => f.split(/[/\\]/).pop()).join(', ')));
-    const btnRow = el('div', 'qc-btn-row');
-    btnRow.appendChild(btn('Keep All', () => vscode.postMessage({ type: 'keepAll' })));
-    btnRow.appendChild(btn('Undo All', () => vscode.postMessage({ type: 'undoAll' })));
-    btnRow.appendChild(btn('Review', () => vscode.postMessage({ type: 'review' })));
-    pendingBar.appendChild(btnRow);
-  } else {
-    pendingBar.appendChild(el('span', 'qc-muted', '无待确认批次（Agent 写入后可撤销）'));
-  }
-  top.appendChild(pendingBar);
+  const toggle = btn(sidebarOpen ? '⟨' : '⟩', () => {
+    vscode.postMessage({ type: 'setSidebarOpen', open: !sidebarOpen });
+  }, sidebarOpen ? '收起会话侧栏' : '展开会话侧栏');
+  toggle.className = 'qc-btn qc-sb-toggle';
+  root.appendChild(toggle);
 
-  const modeRow = el('div', 'qc-row');
-  modeRow.appendChild(el('span', 'qc-label', '模式'));
-  for (const m of ['ask', 'plan', 'agent'] as const) {
-    modeRow.appendChild(
-      chip(m, st.ui?.mode === m, () => vscode.postMessage({ type: 'setMode', mode: m as AgentMode }))
-    );
-  }
-  top.appendChild(modeRow);
-
-  const mcpRow = el('div', 'qc-row');
-  const mcp = st.ui?.mcp;
-  mcpRow.appendChild(
-    el(
-      'span',
-      'qc-muted',
-      mcp?.loadedPath
-        ? `MCP: ${mcp.loadedPath}（${mcp.serverCount} 服务）`
-        : 'MCP: 未找到工作区 mcp.json / .vscode/mcp.json'
-    )
+  const sessionPanel = el('aside', 'qc-session-panel' + (sidebarOpen ? '' : ' qc-session-panel--collapsed'));
+  sessionPanel.appendChild(el('div', 'qc-side-head', '会话'));
+  sessionPanel.appendChild(
+    btn('+ 新建', () => vscode.postMessage({ type: 'newSession' }), '新建会话')
   );
-  mcpRow.appendChild(btn('重载 MCP', () => vscode.postMessage({ type: 'reloadMcp' })));
-  if (mcp?.lastError) mcpRow.appendChild(el('span', 'qc-error', mcp.lastError));
-  top.appendChild(mcpRow);
-
-  root.appendChild(top);
-
-  const body = el('div', 'qc-body');
-  const sidebar = el('div', 'qc-sidebar');
-  sidebar.appendChild(el('div', 'qc-side-title', '会话'));
-  sidebar.appendChild(btn('+ 新建', () => vscode.postMessage({ type: 'newSession' })));
   const list = el('div', 'qc-session-list');
   for (const s of st.ui?.sessions ?? []) {
     const item = el('div', 'qc-session' + (st.ui?.activeSessionId === s.id ? ' qc-session-active' : ''));
@@ -91,98 +79,140 @@ function render() {
     const del = el('button', 'qc-del', '×');
     del.onclick = (e) => {
       e.stopPropagation();
+      if (!confirm('删除此会话？')) return;
       vscode.postMessage({ type: 'deleteSession', sessionId: s.id });
     };
     item.appendChild(del);
     list.appendChild(item);
   }
-  sidebar.appendChild(list);
-  body.appendChild(sidebar);
+  sessionPanel.appendChild(list);
+  root.appendChild(sessionPanel);
 
-  const main = el('div', 'qc-main');
+  const main = el('div', 'qc-maincol');
+
+  const pendingStrip = el('div', 'qc-pending-strip');
+  const p = st.ui?.pending;
+  if (p?.hasBatch) {
+    pendingStrip.appendChild(
+      el('span', 'qc-pending-text', `待确认 ${p.files.length} 个文件 · ` + p.files.map((f) => f.split(/[/\\]/).pop()).join(', '))
+    );
+    const actions = el('span', 'qc-pending-actions');
+    actions.appendChild(btn('Keep All', () => vscode.postMessage({ type: 'keepAll' })));
+    actions.appendChild(btn('Undo All', () => vscode.postMessage({ type: 'undoAll' })));
+    actions.appendChild(btn('Review', () => vscode.postMessage({ type: 'review' })));
+    pendingStrip.appendChild(actions);
+  } else {
+    pendingStrip.classList.add('qc-pending-strip--idle');
+    pendingStrip.appendChild(el('span', 'qc-muted', '无待确认改动'));
+  }
+  main.appendChild(pendingStrip);
+
   const chat = el('div', 'qc-chat');
   const sid = st.ui?.activeSessionId;
   const msgs = sid ? st.messagesBySession[sid] ?? [] : [];
   for (const m of msgs) {
     const bubble = el('div', 'qc-msg qc-msg-' + m.role);
-    const text = m.parts
-      .map((p) => (p.type === 'text' ? p.text : '[image]'))
-      .join('\n');
-    bubble.textContent = text;
+    bubble.textContent = m.parts.map((x) => (x.type === 'text' ? x.text : '[image]')).join('\n');
     chat.appendChild(bubble);
   }
-  chat.scrollTop = chat.scrollHeight;
   main.appendChild(chat);
 
-  const controls = el('div', 'qc-controls');
-  const modelRow = el('div', 'qc-row');
-  modelRow.appendChild(el('span', 'qc-label', '模型档案'));
-  const sel = document.createElement('select');
-  for (const p of st.ui?.modelProfiles ?? []) {
+  const toolbar = el('div', 'qc-toolbar');
+  toolbar.appendChild(el('span', 'qc-tlabel', '模式'));
+  const modeSel = document.createElement('select');
+  modeSel.className = 'qc-select qc-select--sm';
+  for (const m of ['ask', 'plan', 'agent'] as const) {
     const o = document.createElement('option');
-    o.value = p.id;
-    o.textContent = `${p.label} · ${p.defaultModel}`;
-    if (p.id === st.ui?.activeProfileId) o.selected = true;
-    sel.appendChild(o);
+    o.value = m;
+    o.textContent = m === 'ask' ? 'Ask' : m === 'plan' ? 'Plan' : 'Agent';
+    if (st.ui?.mode === m) o.selected = true;
+    modeSel.appendChild(o);
   }
-  sel.onchange = () => vscode.postMessage({ type: 'setModelProfile', profileId: sel.value });
-  modelRow.appendChild(sel);
-  modelRow.appendChild(btn('保存 Token', () => openTokenModal()));
-  controls.appendChild(modelRow);
+  modeSel.onchange = () => vscode.postMessage({ type: 'setMode', mode: modeSel.value as AgentMode });
+  toolbar.appendChild(modeSel);
+
+  toolbar.appendChild(el('span', 'qc-tsep'));
+  toolbar.appendChild(el('span', 'qc-tlabel', '服务'));
+  const svcSel = document.createElement('select');
+  svcSel.className = 'qc-select';
+  const tc = st.ui?.tokenConfigured ?? {};
+  for (const pr of st.ui?.modelProfiles ?? []) {
+    const o = document.createElement('option');
+    o.value = pr.id;
+    o.textContent = `${pr.label}${tc[pr.id] ? ' ✓' : ''}`;
+    if (pr.id === st.ui?.activeProfileId) o.selected = true;
+    svcSel.appendChild(o);
+  }
+  svcSel.onchange = () => vscode.postMessage({ type: 'setModelProfile', profileId: svcSel.value });
+  toolbar.appendChild(svcSel);
+
+  toolbar.appendChild(el('span', 'qc-tsep'));
+  toolbar.appendChild(el('span', 'qc-tlabel', '模型'));
+  const modelIdSel = document.createElement('select');
+  modelIdSel.className = 'qc-select qc-select--model';
+  for (const mid of st.ui?.availableModels ?? []) {
+    const o = document.createElement('option');
+    o.value = mid;
+    o.textContent = mid;
+    if (mid === st.ui?.selectedModel) o.selected = true;
+    modelIdSel.appendChild(o);
+  }
+  modelIdSel.onchange = () => vscode.postMessage({ type: 'setModelId', modelId: modelIdSel.value });
+  toolbar.appendChild(modelIdSel);
+
+  toolbar.appendChild(el('span', 'qc-tsep'));
+  const mcp = st.ui?.mcp;
+  const mcpTitle = mcp?.loadedPath
+    ? `${mcp.loadedPath}\n${mcp.serverCount} 个 MCP 服务${mcp.lastError ? '\n错误: ' + mcp.lastError : ''}`
+    : '未找到 mcp.json，点击扫描';
+  toolbar.appendChild(btn('MCP ↻', () => vscode.postMessage({ type: 'reloadMcp' }), mcpTitle));
+
+  toolbar.appendChild(
+    btn('密钥…', () => vscode.postMessage({ type: 'openTokenWizard' }), '在顶部 QuickPick 中配置 Token')
+  );
+
+  const profs = st.ui?.modelProfiles ?? [];
+  const nOk = profs.filter((x) => tc[x.id]).length;
+  toolbar.appendChild(el('span', 'qc-token-badge', `Token ${nOk}/${profs.length}`));
+
+  main.appendChild(toolbar);
 
   const ta = document.createElement('textarea');
   ta.className = 'qc-input';
-  ta.placeholder = '输入需求，支持多轮上下文；可粘贴截图到输入区（后续可扩展图片按钮）';
+  ta.placeholder = '输入消息…';
   ta.value = st.draft;
   ta.oninput = () => (st.draft = ta.value);
-  controls.appendChild(ta);
+  main.appendChild(ta);
 
-  const sendRow = el('div', 'qc-row');
-  sendRow.appendChild(
-    btn('发送', () => {
-      const text = ta.value.trim();
-      if (!text || !sid) return;
-      ta.value = '';
-      st.draft = '';
-      vscode.postMessage({ type: 'sendMessage', sessionId: sid, text });
-    })
+  const bottom = el('div', 'qc-bottom');
+  const sendBtn = btn('发送', () => {
+    const text = ta.value.trim();
+    if (!text || !sid) return;
+    ta.value = '';
+    st.draft = '';
+    vscode.postMessage({ type: 'sendMessage', sessionId: sid, text });
+  });
+  bottom.appendChild(sendBtn);
+
+  const streaming = !!st.ui?.isStreaming;
+  const stopBtn = btn('停止', () => vscode.postMessage({ type: 'stopGeneration' }), '中止当前生成');
+  stopBtn.classList.add('qc-btn-stop');
+  stopBtn.disabled = !streaming;
+  bottom.appendChild(stopBtn);
+
+  bottom.appendChild(
+    el('span', 'qc-hint qc-muted', streaming ? '生成中…' : '停止会中断当前请求；命令面板：「QingCoder: 停止生成」')
   );
-  sendRow.appendChild(el('span', 'qc-muted', '图片：请使用支持视觉的模型，并在后续版本添加选择器'));
-  controls.appendChild(sendRow);
+  main.appendChild(bottom);
 
-  main.appendChild(controls);
-  body.appendChild(main);
-  root.appendChild(body);
+  root.appendChild(main);
 
   const style = el('style');
   style.textContent = css;
   root.appendChild(style);
 
   app.appendChild(root);
-}
-
-function btn(label: string, onClick: () => void) {
-  const b = document.createElement('button');
-  b.className = 'qc-btn';
-  b.textContent = label;
-  b.onclick = onClick;
-  return b;
-}
-
-function chip(label: string, on: boolean, onClick: () => void) {
-  const b = document.createElement('button');
-  b.className = 'qc-chip' + (on ? ' qc-chip-on' : '');
-  b.textContent = label;
-  b.onclick = onClick;
-  return b;
-}
-
-function openTokenModal() {
-  const id = st.ui?.activeProfileId;
-  if (!id) return;
-  const token = prompt('粘贴 API Token（仅保存在本机 VS Code SecretStorage）');
-  if (!token) return;
-  vscode.postMessage({ type: 'saveToken', profileId: id, token });
+  scrollChatToBottom();
 }
 
 window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
@@ -214,10 +244,12 @@ window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
     }
     list[idx].parts = [{ type: 'text', text: st.streaming.buf }];
     render();
+    scrollChatToBottom();
   }
   if (msg.type === 'streamEnd') {
     st.streaming = null;
     render();
+    scrollChatToBottom();
   }
   if (msg.type === 'error') {
     alert(msg.message);
@@ -231,31 +263,39 @@ window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
 vscode.postMessage({ type: 'ready' });
 
 const css = `
-.qc-root { display:flex; flex-direction:column; height:100vh; color: var(--vscode-foreground); font-size:12px; }
-.qc-top { border-bottom:1px solid var(--vscode-widget-border); padding:8px; display:flex; flex-direction:column; gap:6px; }
-.qc-body { flex:1; display:flex; min-height:0; }
-.qc-sidebar { width:160px; border-right:1px solid var(--vscode-widget-border); padding:8px; overflow:auto; display:flex; flex-direction:column; gap:6px;}
-.qc-session { padding:4px 6px; border-radius:4px; cursor:pointer; position:relative; padding-right:18px; display:flex; align-items:center; gap:4px;}
-.qc-session-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.qc-root { display:flex; flex-direction:row; height:100vh; color: var(--vscode-foreground); font-size:12px; min-height:0;}
+.qc-sb-toggle { flex-shrink:0; width:28px; align-self:stretch; border:none; border-right:1px solid var(--vscode-widget-border); border-radius:0; background: var(--vscode-sideBar-background); cursor:pointer; font-size:14px;}
+.qc-session-panel { flex-shrink:0; width:200px; display:flex; flex-direction:column; gap:6px; padding:8px; border-right:1px solid var(--vscode-widget-border); background: var(--vscode-sideBar-background); min-height:0;}
+.qc-session-panel--collapsed { width:0; padding:0; overflow:hidden; border:none;}
+.qc-side-head { font-weight:600; font-size:11px; opacity:0.9;}
+.qc-session-list { flex:1; overflow:auto; display:flex; flex-direction:column; gap:4px; min-height:0;}
+.qc-session { padding:6px 20px 6px 6px; border-radius:6px; cursor:pointer; position:relative; display:flex; align-items:center;}
 .qc-session-active { background: var(--vscode-list-inactiveSelectionBackground); }
-.qc-del { position:absolute; right:2px; top:2px; border:none; background:transparent; cursor:pointer;}
-.qc-main { flex:1; display:flex; flex-direction:column; min-width:0;}
-.qc-chat { flex:1; overflow:auto; padding:8px; display:flex; flex-direction:column; gap:8px;}
-.qc-msg { padding:8px; border-radius:6px; max-width:95%; white-space:pre-wrap;}
-.qc-msg-user { align-self:flex-end; background: var(--vscode-input-background); }
-.qc-msg-assistant { align-self:flex-start; background: var(--vscode-editor-inactiveSelectionBackground); }
-.qc-controls { border-top:1px solid var(--vscode-widget-border); padding:8px; display:flex; flex-direction:column; gap:6px;}
-.qc-input { width:100%; min-height:72px; resize:vertical; color:inherit; background: var(--vscode-input-background); border:1px solid var(--vscode-input-border); border-radius:4px; padding:6px;}
-.qc-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
-.qc-btn { padding:4px 8px; cursor:pointer; border-radius:4px; border:1px solid var(--vscode-button-border); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);}
-.qc-chip { padding:2px 8px; border-radius:999px; border:1px solid var(--vscode-widget-border); background:transparent; cursor:pointer;}
-.qc-chip-on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent;}
-.qc-label { font-weight:600;}
+.qc-session-title { font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.qc-del { position:absolute; right:2px; top:4px; border:none; background:transparent; cursor:pointer; opacity:0.7;}
+.qc-maincol { flex:1; min-width:0; display:flex; flex-direction:column; min-height:0;}
+.qc-pending-strip { flex-shrink:0; display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 8px; border-bottom:1px solid var(--vscode-widget-border); font-size:11px;}
+.qc-pending-strip--idle { opacity:0.85;}
+.qc-pending-text { flex:1; min-width:120px; }
+.qc-pending-actions { display:flex; flex-wrap:wrap; gap:4px;}
+.qc-chat { flex:1; min-height:0; overflow:auto; overflow-anchor:none; padding:10px; display:flex; flex-direction:column; gap:10px;}
+.qc-msg { padding:10px 12px; border-radius:8px; max-width:92%; white-space:pre-wrap; line-height:1.45;}
+.qc-msg-user { align-self:flex-end; background: var(--vscode-input-background); border:1px solid var(--vscode-input-border);}
+.qc-msg-assistant { align-self:flex-start; background: var(--vscode-editor-inactiveSelectionBackground);}
+.qc-toolbar { flex-shrink:0; display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; padding:8px; border-top:1px solid var(--vscode-widget-border); border-bottom:1px solid var(--vscode-widget-border); background: var(--vscode-sideBar-background);}
+.qc-tlabel { font-size:11px; opacity:0.85; margin-right:-4px;}
+.qc-tsep { width:1px; height:16px; background: var(--vscode-widget-border); margin:0 2px;}
+.qc-select { max-width:160px; color:inherit; background: var(--vscode-dropdown-background); border:1px solid var(--vscode-dropdown-border); border-radius:4px; padding:3px 6px;}
+.qc-select--sm { max-width:86px;}
+.qc-select--model { max-width:220px;}
+.qc-btn { padding:3px 8px; cursor:pointer; border-radius:4px; border:1px solid var(--vscode-button-border); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); font-size:11px;}
+.qc-btn-stop { background: var(--vscode-inputValidation-errorBackground); color: var(--vscode-errorForeground);}
+.qc-btn:disabled { opacity:0.45; cursor:not-allowed;}
+.qc-input { flex-shrink:0; width:100%; min-height:88px; box-sizing:border-box; resize:vertical; margin:0; padding:8px; color:inherit; background: var(--vscode-input-background); border:none; border-bottom:1px solid var(--vscode-widget-border);}
+.qc-bottom { flex-shrink:0; display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px;}
+.qc-hint { font-size:10px; flex:1; min-width:120px;}
 .qc-muted { opacity:0.75;}
-.qc-error { color: var(--vscode-errorForeground);}
-.qc-mono { font-family: var(--vscode-editor-font-family); font-size:11px;}
-.qc-pending { display:flex; flex-direction:column; gap:4px;}
-.qc-btn-row { display:flex; gap:6px; flex-wrap:wrap;}
+.qc-token-badge { font-size:11px; font-family: var(--vscode-editor-font-family); opacity:0.9;}
 `;
 
 render();

@@ -12,7 +12,9 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:qingcoder.chatView"
+    "onView:qingcoder.chatView",
+    "onCommand:qingcoder.configureToken",
+    "onCommand:qingcoder.stopGeneration"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -38,6 +40,14 @@
       {
         "command": "qingcoder.openChat",
         "title": "QingCoder: Open Chat"
+      },
+      {
+        "command": "qingcoder.configureToken",
+        "title": "QingCoder: 配置或清除 API Token…"
+      },
+      {
+        "command": "qingcoder.stopGeneration",
+        "title": "QingCoder: 停止生成"
       },
       {
         "command": "qingcoder.keepAll",

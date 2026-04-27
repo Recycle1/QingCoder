@@ -18,7 +18,7 @@ export class KeepUndoCodeLensProvider implements vscode.CodeLensProvider {
     const pending = this.ledger.getPendingFiles();
     if (!pending.includes(document.uri.fsPath)) return [];
     const range = new vscode.Range(0, 0, 0, 0);
-    return [
+    const lenses: vscode.CodeLens[] = [
       new vscode.CodeLens(range, {
         title: 'QingCoder: Keep',
         command: 'qingcoder.keepFile',
@@ -30,5 +30,15 @@ export class KeepUndoCodeLensProvider implements vscode.CodeLensProvider {
         arguments: [document.uri.fsPath],
       }),
     ];
+    if (this.ledger.getFileState(document.uri.fsPath)?.stack.length) {
+      lenses.push(
+        new vscode.CodeLens(range, {
+          title: 'QingCoder: 撤上一步',
+          command: 'qingcoder.undoLastPatch',
+          arguments: [document.uri.fsPath],
+        })
+      );
+    }
+    return lenses;
   }
 }

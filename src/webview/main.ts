@@ -31,8 +31,23 @@ const st: LocalState = {
   streaming: null,
 };
 
-const app = document.getElementById('app');
-if (!app) throw new Error('#app missing');
+/**
+ * 主聊天区是否与底部对齐（≤2px 才算贴底）。
+ * 仅由此状态决定「生成/重绘后是否滚到底」；用户一旦离开底部则不再跟随，直到再次贴底或发送消息。
+ */
+let chatAtBottom = true;
+/** 程序化改 scrollTop 时忽略 scroll 事件，避免误判贴底状态 */
+let suppressChatScrollStick = false;
+/** 流式 thinking 小窗是否与底部对齐 */
+let thinkingAtBottom = true;
+let suppressThinkingScrollStick = false;
+
+/** 用于切换会话时恢复「跟随底部」 */
+let lastRenderedSessionId: string | undefined;
+
+const appEl = document.getElementById('app');
+if (!appEl) throw new Error('#app missing');
+const app: HTMLElement = appEl;
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -71,21 +86,85 @@ function formatAgentRow(item: AgentActivityItem): string {
   }
 }
 
-function scrollChatToBottom() {
+const CHAT_BOTTOM_SLACK_PX = 2;
+
+function isChatAtBottom(el: HTMLElement): boolean {
+  const slack = el.scrollHeight - el.scrollTop - el.clientHeight;
+  return slack <= CHAT_BOTTOM_SLACK_PX;
+}
+
+/** 仅应在「用户已贴底」时调用：把聊天滚到最新；不读全局流式状态 */
+function scrollChatToBottomIfPinned() {
+  if (!chatAtBottom) return;
+  suppressChatScrollStick = true;
   requestAnimationFrame(() => {
     const el = document.querySelector('.qc-chat');
     if (el) el.scrollTop = el.scrollHeight;
     requestAnimationFrame(() => {
       const el2 = document.querySelector('.qc-chat');
       if (el2) el2.scrollTop = el2.scrollHeight;
+      suppressChatScrollStick = false;
     });
   });
 }
 
+function bindChatScrollStick(chatEl: HTMLElement) {
+  chatEl.addEventListener(
+    'scroll',
+    () => {
+      if (suppressChatScrollStick) return;
+      chatAtBottom = isChatAtBottom(chatEl);
+    },
+    { passive: true }
+  );
+}
+
+const THINKING_BOTTOM_SLACK_PX = 2;
+
+function isThinkingAtBottom(bar: HTMLElement): boolean {
+  return bar.scrollHeight - bar.scrollTop - bar.clientHeight <= THINKING_BOTTOM_SLACK_PX;
+}
+
+function scrollThinkingBarToBottomIfPinned(bar: HTMLElement) {
+  if (!thinkingAtBottom) return;
+  suppressThinkingScrollStick = true;
+  requestAnimationFrame(() => {
+    bar.scrollTop = bar.scrollHeight;
+    requestAnimationFrame(() => {
+      bar.scrollTop = bar.scrollHeight;
+      suppressThinkingScrollStick = false;
+    });
+  });
+}
+
+function bindThinkingStreamScrollStick(bar: HTMLElement) {
+  bar.addEventListener(
+    'scroll',
+    () => {
+      if (suppressThinkingScrollStick) return;
+      thinkingAtBottom = isThinkingAtBottom(bar);
+    },
+    { passive: true }
+  );
+}
+
 function render() {
+  /** 整页重绘会换掉 .qc-chat，必须在清空前记下距底部的距离，否则上滚读历史时会被锁在 scrollTop=0 */
+  let chatScrollRestoreDist: number | null = null;
+  const prevChat = app.querySelector('.qc-chat');
+  if (prevChat instanceof HTMLElement && !chatAtBottom) {
+    chatScrollRestoreDist = prevChat.scrollHeight - prevChat.scrollTop - prevChat.clientHeight;
+  }
+
   app.innerHTML = '';
   const root = el('div', 'qc-root');
   const sidebarOpen = st.ui?.sidebarOpen === true;
+  const sidPre = st.ui?.activeSessionId;
+  if (sidPre !== lastRenderedSessionId) {
+    chatAtBottom = true;
+    thinkingAtBottom = true;
+    lastRenderedSessionId = sidPre ?? undefined;
+  }
 
   const toggle = btn(sidebarOpen ? '⟨' : '⟩', () => {
     vscode.postMessage({ type: 'setSidebarOpen', open: !sidebarOpen });
@@ -118,50 +197,9 @@ function render() {
 
   const main = el('div', 'qc-maincol');
 
-  const pendingStrip = el('div', 'qc-pending-strip');
-  const p = st.ui?.pending;
-  if (p?.hasBatch) {
-    pendingStrip.appendChild(
-      el(
-        'span',
-        'qc-pending-text',
-        `待确认 ${p.files.length} 个文件 · ` + p.files.map((f) => (f.path.split(/[/\\]/).pop() ?? f.path)).join(', ')
-      )
-    );
-    const actions = el('span', 'qc-pending-actions');
-    actions.appendChild(btn('Keep All', () => vscode.postMessage({ type: 'keepAll' })));
-    actions.appendChild(btn('Undo All', () => vscode.postMessage({ type: 'undoAll' })));
-    actions.appendChild(btn('Review', () => vscode.postMessage({ type: 'review' })));
-    pendingStrip.appendChild(actions);
-  } else {
-    pendingStrip.classList.add('qc-pending-strip--idle');
-    pendingStrip.appendChild(el('span', 'qc-muted', '无待确认改动'));
-  }
-  main.appendChild(pendingStrip);
-
   const sid = st.ui?.activeSessionId;
+  const p = st.ui?.pending;
   const act = sid ? st.agentActivityBySession[sid] ?? [] : [];
-
-  const chat = el('div', 'qc-chat');
-  const msgs = sid ? st.messagesBySession[sid] ?? [] : [];
-  for (const m of msgs) {
-    const bubble = el('div', 'qc-msg qc-msg-' + m.role);
-    const text = m.parts.map((x) => (x.type === 'text' ? x.text : '[image]')).join('\n');
-    if (m.role === 'assistant') {
-      const streamingThis = st.streaming?.sessionId === sid && st.streaming?.id === m.id;
-      if (streamingThis) {
-        bubble.classList.add('qc-msg-streaming');
-        bubble.textContent = text;
-      } else {
-        bubble.classList.add('qc-msg-md');
-        bubble.innerHTML = renderAssistantMarkdown(text);
-      }
-    } else {
-      bubble.textContent = text;
-    }
-    chat.appendChild(bubble);
-  }
-  main.appendChild(chat);
 
   const toolbar = el('div', 'qc-toolbar');
   toolbar.appendChild(el('span', 'qc-tlabel', '模式'));
@@ -176,7 +214,6 @@ function render() {
   }
   modeSel.onchange = () => vscode.postMessage({ type: 'setMode', mode: modeSel.value as AgentMode });
   toolbar.appendChild(modeSel);
-
   toolbar.appendChild(el('span', 'qc-tsep'));
   toolbar.appendChild(el('span', 'qc-tlabel', '服务'));
   const svcSel = document.createElement('select');
@@ -221,10 +258,59 @@ function render() {
   const nOk = profs.filter((x) => tc[x.id]).length;
   toolbar.appendChild(el('span', 'qc-token-badge', `Token ${nOk}/${profs.length}`));
 
-  main.appendChild(toolbar);
+  const pendingBar = el('div', 'qc-pending-above-chat');
+  if (p?.hasBatch && p.files.length > 0) {
+    pendingBar.appendChild(el('div', 'qc-pending-bar-title', '待确认改动'));
+    const sel = document.createElement('select');
+    sel.className = 'qc-select qc-pending-dropdown';
+    const opt0 = document.createElement('option');
+    opt0.value = '';
+    opt0.textContent = '选择文件查看 diff…';
+    sel.appendChild(opt0);
+    for (const f of p.files) {
+      const o = document.createElement('option');
+      o.value = f.path;
+      const short = f.path.split(/[/\\]/).pop() ?? f.path;
+      const hc = f.hunkCount ?? 0;
+      const sd = f.stackDepth ?? 0;
+      o.textContent = `${short}  +${f.added} −${f.removed}  · ${hc} 块 · ${sd} 步`;
+      sel.appendChild(o);
+    }
+    sel.onchange = () => {
+      const v = sel.value;
+      if (v) vscode.postMessage({ type: 'openPendingDiff', path: v });
+      sel.value = '';
+    };
+    pendingBar.appendChild(sel);
+    const glob = el('div', 'qc-pending-global-actions');
+    glob.appendChild(btn('Keep All', () => vscode.postMessage({ type: 'keepAll' })));
+    glob.appendChild(btn('Undo All', () => vscode.postMessage({ type: 'undoAll' })));
+    glob.appendChild(btn('Review 全部', () => vscode.postMessage({ type: 'review' })));
+    pendingBar.appendChild(glob);
+    for (const f of p.files) {
+      const row = el('div', 'qc-pending-file-actions');
+      const short = f.path.split(/[/\\]/).pop() ?? f.path;
+      row.appendChild(el('span', 'qc-pending-file-name', short));
+      row.appendChild(el('span', 'qc-line-add', `+${f.added}`));
+      row.appendChild(document.createTextNode(' '));
+      row.appendChild(el('span', 'qc-line-del', `−${f.removed}`));
+      row.appendChild(el('span', 'qc-pending-meta', `${f.hunkCount ?? 0} 块`));
+      const fp = f.path;
+      row.appendChild(btn('Diff', () => vscode.postMessage({ type: 'openPendingDiff', path: fp }), f.path));
+      if ((f.stackDepth ?? 0) > 0) {
+        row.appendChild(btn('撤上一步', () => vscode.postMessage({ type: 'undoLastPatch', path: fp }), '撤销该文件最后一次写入'));
+      }
+      row.appendChild(btn('Keep', () => vscode.postMessage({ type: 'keepFile', path: fp })));
+      row.appendChild(btn('Undo', () => vscode.postMessage({ type: 'undoFile', path: fp })));
+      pendingBar.appendChild(row);
+    }
+  } else {
+    pendingBar.classList.add('qc-pending-above-chat--idle');
+    pendingBar.appendChild(el('span', 'qc-muted', '无待确认文件改动'));
+  }
 
-  const pendingStats = p?.hasBatch && p.files.length > 0 ? p.files : [];
-  const showComposeFold = act.length > 0 || pendingStats.length > 0;
+  let composeFoldEl: HTMLElement | null = null;
+  const showComposeFold = act.length > 0;
   if (showComposeFold) {
     const fold = el('div', 'qc-compose-fold' + (st.agentFoldOpen ? ' qc-compose-fold--open' : ''));
     const head = document.createElement('button');
@@ -236,47 +322,136 @@ function render() {
     };
     const chev = el('span', 'qc-compose-fold-chev', st.agentFoldOpen ? '▼' : '▶');
     head.appendChild(chev);
-    const titleBits: string[] = [];
-    if (act.length) titleBits.push(`执行 ${act.length} 步`);
-    if (pendingStats.length) titleBits.push(`${pendingStats.length} 个文件待确认`);
-    head.appendChild(el('span', 'qc-compose-fold-title', titleBits.join(' · ') || '详情'));
-    if (pendingStats.length) {
-      const sumA = pendingStats.reduce((s, f) => s + f.added, 0);
-      const sumR = pendingStats.reduce((s, f) => s + f.removed, 0);
-      const wrap = el('span', 'qc-compose-fold-stats');
-      wrap.appendChild(el('span', 'qc-line-add', `+${sumA}`));
-      wrap.appendChild(document.createTextNode(' '));
-      wrap.appendChild(el('span', 'qc-line-del', `−${sumR}`));
-      head.appendChild(wrap);
-    }
+    head.appendChild(el('span', 'qc-compose-fold-title', `工具与写入预览 · ${act.length} 条`));
     fold.appendChild(head);
-
     if (st.agentFoldOpen) {
       const body = el('div', 'qc-compose-fold-body');
-      if (act.length) {
-        body.appendChild(el('div', 'qc-compose-fold-subhead', '执行过程'));
-        for (const item of act) {
-          const row = el('div', 'qc-agent-row qc-agent-row-' + item.kind);
-          row.textContent = formatAgentRow(item);
-          body.appendChild(row);
+      for (const item of act) {
+        const block = el('div', 'qc-agent-block');
+        const row = el('div', 'qc-agent-row qc-agent-row-' + item.kind);
+        row.textContent = formatAgentRow(item);
+        block.appendChild(row);
+        if (item.kind === 'tool_done' && item.snippetText) {
+          const cap = el('div', 'qc-snippet-cap', item.snippetPath ? item.snippetPath.split(/[/\\]/).pop() ?? '' : '');
+          block.appendChild(cap);
+          const pre = el('pre', 'qc-tool-snippet');
+          pre.textContent = item.snippetText;
+          block.appendChild(pre);
         }
-      }
-      if (pendingStats.length) {
-        body.appendChild(el('div', 'qc-compose-fold-subhead', '待确认文件'));
-        for (const f of pendingStats) {
-          const row = el('div', 'qc-pending-file-row');
-          const short = f.path.split(/[/\\]/).pop() ?? f.path;
-          row.appendChild(el('span', 'qc-pending-file-name', short));
-          row.appendChild(el('span', 'qc-line-add', `+${f.added}`));
-          row.appendChild(document.createTextNode(' '));
-          row.appendChild(el('span', 'qc-line-del', `−${f.removed}`));
-          body.appendChild(row);
-        }
+        body.appendChild(block);
       }
       fold.appendChild(body);
     }
-    main.appendChild(fold);
+    composeFoldEl = fold;
   }
+
+  const chat = el('div', 'qc-chat');
+  const msgs = sid ? st.messagesBySession[sid] ?? [] : [];
+  const OUT = '<<OUTPUT>>';
+  for (const m of msgs) {
+    if (m.role === 'assistant') {
+      const turn = el('div', 'qc-assistant-turn');
+      const bubble = el('div', 'qc-msg qc-msg-assistant');
+      const textOnly = m.parts
+        .filter((x) => x.type === 'text' || x.type === 'thinking')
+        .map((x) => (x as { text: string }).text)
+        .join('\n');
+      const streamingThis = st.streaming?.sessionId === sid && st.streaming?.id === m.id;
+      if (streamingThis) {
+        const raw = st.streaming?.buf ?? '';
+        const idx = raw.indexOf(OUT);
+        const thinkBar = el('div', 'qc-stream-thinking');
+        const afterOut =
+          idx === -1 ? '' : raw.slice(idx + OUT.length).replace(/^[\r\n]+/, '');
+        if (idx === -1) {
+          thinkBar.textContent = raw;
+        } else {
+          thinkBar.textContent = raw.slice(0, idx).trimEnd();
+        }
+        if (!thinkBar.textContent) thinkBar.style.display = 'none';
+        turn.appendChild(thinkBar);
+        const outTrim = afterOut.trim();
+        if (outTrim.length > 0) {
+          const contentBub = el('div', 'qc-msg qc-msg-assistant qc-msg-streaming');
+          contentBub.textContent = afterOut;
+          turn.appendChild(contentBub);
+        }
+      } else {
+        bubble.classList.add('qc-msg-md');
+        for (const part of m.parts) {
+          if (part.type === 'thinking') {
+            const det = document.createElement('details');
+            det.className = 'qc-thinking';
+            const sum = document.createElement('summary');
+            sum.textContent = '思考过程';
+            det.appendChild(sum);
+            const body = el('div', 'qc-thinking-body');
+            body.innerHTML = renderAssistantMarkdown((part as { text: string }).text);
+            det.appendChild(body);
+            bubble.appendChild(det);
+          } else if (part.type === 'text') {
+            const block = el('div', 'qc-md-block');
+            block.innerHTML = renderAssistantMarkdown((part as { text: string }).text);
+            bubble.appendChild(block);
+          } else if (part.type === 'tool_trace') {
+            const tp = part as { type: 'tool_trace'; name: string; body: string };
+            const panel = el('div', 'qc-tool-trace');
+            panel.appendChild(el('div', 'qc-tool-trace-head', `工具 · ${tp.name}`));
+            const pre = el('pre', 'qc-tool-trace-body');
+            pre.textContent = tp.body;
+            panel.appendChild(pre);
+            bubble.appendChild(panel);
+          } else if (part.type === 'tool_result') {
+            const tr = part as { type: 'tool_result'; name: string; output: string };
+            const det = document.createElement('details');
+            det.className = 'qc-tool-result';
+            det.open = false;
+            const sum = document.createElement('summary');
+            sum.textContent = `工具返回 · ${tr.name}`;
+            det.appendChild(sum);
+            const pre = el('pre', 'qc-tool-result-body');
+            pre.textContent = tr.output;
+            det.appendChild(pre);
+            bubble.appendChild(det);
+          }
+        }
+        if (!bubble.childNodes.length) {
+          bubble.innerHTML = renderAssistantMarkdown(textOnly);
+        }
+        turn.appendChild(bubble);
+        if (m.quickReplies?.length && sid) {
+          const qr = el('div', 'qc-quick-replies');
+          for (const q of m.quickReplies) {
+            const sidNow = sid;
+            qr.appendChild(
+              btn(q.label, () => vscode.postMessage({ type: 'sendMessage', sessionId: sidNow, text: q.payload }), q.payload)
+            );
+          }
+          turn.appendChild(qr);
+        }
+      }
+      chat.appendChild(turn);
+    } else {
+      const bubble = el('div', 'qc-msg qc-msg-' + m.role);
+      const text = m.parts
+        .map((x) =>
+          x.type === 'text'
+            ? x.text
+            : x.type === 'tool_trace'
+              ? `[工具 ${x.name}]`
+              : x.type === 'tool_result'
+                ? `[${x.name} 返回]`
+                : '[image]'
+        )
+        .join('\n');
+      bubble.textContent = text;
+      chat.appendChild(bubble);
+    }
+  }
+  main.appendChild(chat);
+  main.appendChild(toolbar);
+  main.appendChild(pendingBar);
+  if (composeFoldEl) main.appendChild(composeFoldEl);
 
   const ta = document.createElement('textarea');
   ta.className = 'qc-input';
@@ -291,6 +466,8 @@ function render() {
     if (!text || !sid) return;
     ta.value = '';
     st.draft = '';
+    chatAtBottom = true;
+    thinkingAtBottom = true;
     vscode.postMessage({ type: 'sendMessage', sessionId: sid, text });
   });
   bottom.appendChild(sendBtn);
@@ -313,7 +490,32 @@ function render() {
   root.appendChild(style);
 
   app.appendChild(root);
-  scrollChatToBottom();
+  for (const tb of root.querySelectorAll('.qc-stream-thinking')) {
+    if (tb instanceof HTMLElement && tb.textContent) {
+      bindThinkingStreamScrollStick(tb);
+      scrollThinkingBarToBottomIfPinned(tb);
+    }
+  }
+  const chatEl = root.querySelector('.qc-chat');
+  if (chatEl instanceof HTMLElement) {
+    bindChatScrollStick(chatEl);
+    if (chatScrollRestoreDist !== null) {
+      const d = chatScrollRestoreDist;
+      suppressChatScrollStick = true;
+      requestAnimationFrame(() => {
+        chatEl.scrollTop = Math.max(0, chatEl.scrollHeight - chatEl.clientHeight - d);
+        requestAnimationFrame(() => {
+          chatEl.scrollTop = Math.max(0, chatEl.scrollHeight - chatEl.clientHeight - d);
+          suppressChatScrollStick = false;
+          chatAtBottom = isChatAtBottom(chatEl);
+        });
+      });
+    } else if (chatAtBottom) {
+      scrollChatToBottomIfPinned();
+    } else {
+      chatAtBottom = isChatAtBottom(chatEl);
+    }
+  }
 }
 
 window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
@@ -330,6 +532,7 @@ window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
   if (msg.type === 'stream') {
     if (!st.streaming || st.streaming.id !== msg.id) {
       st.streaming = { sessionId: msg.sessionId, id: msg.id, buf: '' };
+      thinkingAtBottom = true;
     }
     st.streaming.buf += msg.delta;
     const list = (st.messagesBySession[msg.sessionId] ??= []);
@@ -345,12 +548,11 @@ window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
     }
     list[idx].parts = [{ type: 'text', text: st.streaming.buf }];
     render();
-    scrollChatToBottom();
   }
   if (msg.type === 'streamEnd') {
     st.streaming = null;
+    thinkingAtBottom = true;
     render();
-    scrollChatToBottom();
   }
   if (msg.type === 'agentActivityClear') {
     st.agentActivityBySession[msg.sessionId] = [];
@@ -360,7 +562,6 @@ window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
     const arr = (st.agentActivityBySession[msg.sessionId] ??= []);
     arr.push(msg.item);
     render();
-    scrollChatToBottom();
   }
   if (msg.type === 'error') {
     alert(msg.message);
@@ -385,10 +586,17 @@ const css = `
 .qc-session-title { font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .qc-del { position:absolute; right:2px; top:4px; border:none; background:transparent; cursor:pointer; opacity:0.7;}
 .qc-maincol { flex:1; min-width:0; display:flex; flex-direction:column; min-height:0;}
-.qc-pending-strip { flex-shrink:0; display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 8px; border-bottom:1px solid var(--vscode-widget-border); font-size:11px;}
-.qc-pending-strip--idle { opacity:0.85;}
-.qc-pending-text { flex:1; min-width:120px; }
-.qc-pending-actions { display:flex; flex-wrap:wrap; gap:4px;}
+.qc-pending-above-chat { flex-shrink:0; display:flex; flex-direction:column; gap:6px; padding:8px 10px; border-bottom:1px solid var(--vscode-widget-border); background: var(--vscode-sideBar-background); font-size:11px;}
+.qc-pending-above-chat--idle { opacity:0.85;}
+.qc-pending-bar-title { font-weight:600; font-size:11px;}
+.qc-pending-dropdown { max-width:100%; width:100%; box-sizing:border-box;}
+.qc-pending-global-actions { display:flex; flex-wrap:wrap; gap:4px; align-items:center;}
+.qc-pending-file-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:4px 0; border-top:1px solid var(--vscode-widget-border);}
+.qc-pending-meta { font-size:10px; opacity:0.85; margin-right:4px;}
+.qc-agent-block { margin-bottom:6px;}
+.qc-snippet-cap { font-size:10px; opacity:0.9; margin-top:4px;}
+.qc-tool-snippet { margin:0; padding:6px 8px; max-height:120px; overflow:auto; font-size:10px; background: var(--vscode-textCodeBlock-background); border-radius:4px; white-space:pre-wrap;}
+.qc-stream-thinking { max-height:88px; overflow:auto; padding:6px 8px; margin-bottom:6px; border-radius:6px; font-size:11px; line-height:1.35; white-space:pre-wrap; opacity:0.72; background: var(--vscode-editorWidget-background); border:1px solid var(--vscode-widget-border);}
 .qc-compose-fold { flex-shrink:0; border-top:1px solid var(--vscode-widget-border); border-bottom:1px solid var(--vscode-widget-border); background: var(--vscode-sideBar-background); font-size:11px;}
 .qc-compose-fold-head { width:100%; box-sizing:border-box; display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; padding:6px 10px; margin:0; border:none; cursor:pointer; text-align:left; color: inherit; background: transparent; font: inherit;}
 .qc-compose-fold-head:hover { background: var(--vscode-list-hoverBackground);}
@@ -423,8 +631,20 @@ const css = `
 .qc-msg-md h1, .qc-msg-md h2, .qc-msg-md h3 { font-size:1.05em; margin:0.5em 0 0.25em; font-weight:600;}
 .qc-msg-md table { border-collapse:collapse; font-size:11px; margin:0.5em 0;}
 .qc-msg-md th, .qc-msg-md td { border:1px solid var(--vscode-widget-border); padding:4px 6px;}
+.qc-assistant-turn { align-self:flex-start; max-width:92%; display:flex; flex-direction:column; gap:6px;}
+.qc-thinking { font-size:11px; margin-bottom:2px;}
+.qc-thinking summary { cursor:pointer; user-select:none; opacity:0.9;}
+.qc-thinking-body { margin-top:4px; padding:6px 8px; background: var(--vscode-textBlockQuote-background); border-radius:4px; font-size:11px;}
+.qc-tool-trace { margin-top:6px; border-radius:6px; border:1px solid var(--vscode-input-border); background: var(--vscode-editorWidget-background); overflow:hidden; align-self:stretch; max-width:100%;}
+.qc-tool-trace-head { padding:5px 10px; font-size:11px; font-weight:600; border-bottom:1px solid var(--vscode-widget-border); background: var(--vscode-sideBar-background); opacity:0.95;}
+.qc-tool-trace-body { margin:0; padding:8px 10px; max-height:220px; overflow:auto; font-size:10px; line-height:1.4; white-space:pre-wrap; font-family: var(--vscode-editor-font-family); color: var(--vscode-foreground);}
+.qc-tool-result { margin-top:6px; font-size:11px; border-radius:6px; border:1px solid var(--vscode-testing-iconPassed); background: var(--vscode-editorWidget-background); align-self:stretch; max-width:100%;}
+.qc-tool-result summary { cursor:pointer; user-select:none; padding:6px 10px; font-weight:500;}
+.qc-tool-result-body { margin:0; padding:8px 10px; max-height:280px; overflow:auto; font-size:10px; line-height:1.35; white-space:pre-wrap; font-family: var(--vscode-editor-font-family); border-top:1px solid var(--vscode-widget-border);}
+.qc-md-block + .qc-md-block { margin-top:0.45em;}
+.qc-quick-replies { display:flex; flex-wrap:wrap; gap:6px; padding-left:2px;}
 .qc-msg-user { align-self:flex-end; background: var(--vscode-input-background); border:1px solid var(--vscode-input-border);}
-.qc-msg-assistant { align-self:flex-start; background: var(--vscode-editor-inactiveSelectionBackground);}
+.qc-msg-assistant { align-self:stretch; background: var(--vscode-editor-inactiveSelectionBackground);}
 .qc-toolbar { flex-shrink:0; display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; padding:8px; border-top:1px solid var(--vscode-widget-border); border-bottom:1px solid var(--vscode-widget-border); background: var(--vscode-sideBar-background);}
 .qc-tlabel { font-size:11px; opacity:0.85; margin-right:-4px;}
 .qc-tsep { width:1px; height:16px; background: var(--vscode-widget-border); margin:0 2px;}

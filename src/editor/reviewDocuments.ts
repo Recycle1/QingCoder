@@ -44,3 +44,12 @@ export async function openReviewDiffs(
     await vscode.commands.executeCommand('vscode.diff', left, right, title);
   }
 }
+
+/** 单个文件：基线快照 vs 当前磁盘 */
+export async function openSingleFileReview(
+  provider: SnapshotDocumentProvider,
+  fsPath: string,
+  oldText: string
+): Promise<void> {
+  await openReviewDiffs(provider, [{ fsPath, oldText }]);
+}

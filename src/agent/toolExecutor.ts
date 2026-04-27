@@ -4,8 +4,26 @@ import * as vscode from 'vscode';
 import type { LoadedMcp } from '../mcp/mcpHost';
 import { callMcpTool, flattenTools } from '../mcp/mcpHost';
 import type { EditLedger } from '../editor/editLedger';
+import type { ToolCall } from './toolParse';
 
-export type ToolCall = { name: string; args: Record<string, unknown> };
+export type { ToolCall };
+
+type LineHunk = { startLine: number; endLine: number; newContent: string };
+
+/** 1-based 闭区间行号，自下而上应用，避免行号漂移 */
+export function applyLinePatches(source: string, hunks: LineHunk[]): string {
+  const lines = source.replace(/\r\n/g, '\n').split('\n');
+  const sorted = [...hunks].sort((a, b) => b.startLine - a.startLine);
+  for (const h of sorted) {
+    const s = Math.max(1, Math.floor(h.startLine)) - 1;
+    const e = Math.max(s, Math.floor(h.endLine) - 1);
+    if (s >= lines.length) throw new Error(`startLine ${h.startLine} 超出文件行数`);
+    if (e >= lines.length) throw new Error(`endLine ${h.endLine} 超出文件行数`);
+    const newLines = String(h.newContent ?? '').split('\n');
+    lines.splice(s, e - s + 1, ...newLines);
+  }
+  return lines.join('\n');
+}
 
 function resolvePath(p: string, root: string | undefined): string {
   if (path.isAbsolute(p)) return p;
@@ -57,8 +75,30 @@ export async function executeTool(
       const abs = resolvePath(String(call.args.path), root);
       const content = String(call.args.content ?? '');
       const uri = vscode.Uri.file(abs);
-      await ctx.ledger.applyFullFileWrite(uri, content);
+      await ctx.ledger.applyTextChange(uri, content);
       return JSON.stringify({ ok: true, path: abs, message: '已写入并进入可撤销批次' });
+    }
+    if (call.name === 'apply_patch') {
+      const abs = resolvePath(String(call.args.path), root);
+      const raw = call.args.hunks ?? call.args.patches;
+      if (!Array.isArray(raw)) {
+        return JSON.stringify({ ok: false, error: 'apply_patch 需要 hunks: [{ startLine, endLine, newContent }]' });
+      }
+      const hunks: LineHunk[] = [];
+      for (const x of raw) {
+        if (!x || typeof x !== 'object') continue;
+        const o = x as Record<string, unknown>;
+        hunks.push({
+          startLine: Number(o.startLine ?? o.start ?? 0),
+          endLine: Number(o.endLine ?? o.end ?? o.startLine ?? 0),
+          newContent: String(o.newContent ?? o.content ?? ''),
+        });
+      }
+      if (!hunks.length) return JSON.stringify({ ok: false, error: 'hunks 为空' });
+      const cur = await readText(abs);
+      const next = applyLinePatches(cur, hunks);
+      await ctx.ledger.applyTextChange(vscode.Uri.file(abs), next);
+      return JSON.stringify({ ok: true, path: abs, message: '已按行补丁写入并进入可撤销批次' });
     }
     if (call.name === 'search_text') {
       const q = String(call.args.query ?? '');

@@ -3,6 +3,7 @@ import { ChatViewProvider } from './chat/chatViewProvider';
 import { SessionStore } from './core/sessionStore';
 import { SettingsStore } from './core/settingsStore';
 import { SecretsService } from './core/secretsService';
+
 export async function activate(context: vscode.ExtensionContext) {
   const sessions = new SessionStore(context);
   await sessions.init();
@@ -14,7 +15,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('qingcoder.openChat', async () => {
-      await vscode.commands.executeCommand('qingcoder.chatView.focus');
+      await vscode.commands.executeCommand(`${ChatViewProvider.viewType}.focus`);
     })
   );
   let active = settings.getActiveSessionId();

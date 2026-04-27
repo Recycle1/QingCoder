@@ -22,7 +22,9 @@ export type WebviewToHost =
   | { type: 'undoAll' }
   | { type: 'review' }
   | { type: 'keepFile'; path: string }
-  | { type: 'undoFile'; path: string };
+  | { type: 'undoFile'; path: string }
+  | { type: 'openPendingDiff'; path: string }
+  | { type: 'undoLastPatch'; path: string };
 
 export type ImagePart = { mime: string; dataBase64: string };
 
@@ -33,14 +35,20 @@ export type ModelProfilePayload = {
   defaultModel: string;
 };
 
+export type QuickReplyDto = { label: string; payload: string };
+
 export type ChatMessageDto = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   createdAt: number;
   parts: Array<
     | { type: 'text'; text: string }
+    | { type: 'thinking'; text: string }
+    | { type: 'tool_trace'; name: string; body: string }
+    | { type: 'tool_result'; name: string; output: string }
     | { type: 'image_url'; imageUrl: { url: string } }
   >;
+  quickReplies?: QuickReplyDto[];
 };
 
 /** Agent 回合内工具执行等活动，用于 Webview「执行过程」面板 */
@@ -57,6 +65,9 @@ export type AgentActivityItem = {
   toolName?: string;
   detail?: string;
   ok?: boolean;
+  /** write_file / apply_patch 后磁盘文件片段预览 */
+  snippetPath?: string;
+  snippetText?: string;
 };
 
 /** 待确认批次中单个文件相对批次开始时的增删行数 */
@@ -64,6 +75,10 @@ export type PendingFileLineStat = {
   path: string;
   added: number;
   removed: number;
+  /** structuredPatch 的 hunk 数，便于与 Cursor 对照 */
+  hunkCount: number;
+  /** 本文件工具写入栈深度，可「撤销上一步」次数 */
+  stackDepth: number;
 };
 
 export type HostToWebview =

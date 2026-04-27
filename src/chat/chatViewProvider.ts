@@ -9,9 +9,10 @@ import { modelsForProfile } from '../core/modelCatalog';
 import { loadMcpFromPath, shutdownMcp, type LoadedMcp } from '../mcp/mcpHost';
 import { ChangeHighlighter } from '../editor/highlights';
 import { EditLedger } from '../editor/editLedger';
-import { SnapshotDocumentProvider } from '../editor/reviewDocuments';
+import { SnapshotDocumentProvider, openSingleFileReview } from '../editor/reviewDocuments';
 import { KeepUndoCodeLensProvider } from '../editor/keepCodeLens';
 import { runAgentTurn } from '../agent/orchestrator';
+import { formatAssistantMessageParts } from '../agent/assistantPostProcess';
 import type { ChatMessageApi } from '../llm/openaiCompatible';
 import { routeUserIntent } from '../agent/router';
 import { runTokenCredentialWizard } from '../ui/tokenCredentialFlow';
@@ -72,6 +73,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.ledger.undoFile(fsPath).then(() => {
           this.codeLens.refresh();
           this.postState();
+        })
+      )
+    );
+    ctx.subscriptions.push(
+      vscode.commands.registerCommand('qingcoder.undoLastPatch', (fsPath: string) =>
+        this.ledger.undoLastPatch(fsPath).then(() => {
+          this.codeLens.refresh();
+          void this.postState();
         })
       )
     );
@@ -286,6 +295,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.postState();
           return;
         }
+        case 'openPendingDiff': {
+          const st = this.ledger.getFileState(msg.path);
+          if (st) await openSingleFileReview(this.snapshots, msg.path, st.originBaseline);
+          return;
+        }
+        case 'undoLastPatch': {
+          await this.ledger.undoLastPatch(msg.path);
+          this.codeLens.refresh();
+          await this.postState();
+          return;
+        }
         case 'sendMessage': {
           await this.handleSend(msg.sessionId, msg.text, msg.images);
           return;
@@ -342,7 +362,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const m = usable[i];
       const isLast = i === usable.length - 1;
       if (m.role === 'assistant') {
-        out.push({ role: 'assistant', content: joinTextParts(m) });
+        out.push({ role: 'assistant', content: joinAssistantApiText(m) });
         continue;
       }
       const plain = joinTextParts(m);
@@ -448,9 +468,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       mcp: this.loadedMcp,
     };
 
+    const maxToolResultChars = 14_000;
     let buf = '';
     try {
-      const out = await runAgentTurn(
+      const turn = await runAgentTurn(
         deps,
         apiHistory,
         this.abort.signal,
@@ -460,23 +481,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         },
         (item) => this.post({ type: 'agentActivity', sessionId, item })
       );
-      let finalText = out;
+      let finalText = turn.text;
       if (this.abort?.signal.aborted && !finalText.includes('已停止')) {
         finalText = `${finalText}${finalText ? '\n\n' : ''}（已停止）`;
       }
-      assistantShell.parts = [{ type: 'text', text: finalText }];
+      const shaped = formatAssistantMessageParts(finalText);
+      assistantShell.parts = shaped.parts;
+      if (turn.executedTools?.length) {
+        for (const r of turn.executedTools) {
+          let o = r.output;
+          if (o.length > maxToolResultChars) {
+            o = `${o.slice(0, maxToolResultChars)}\n…(输出已截断，原长 ${r.output.length} 字符)`;
+          }
+          assistantShell.parts.push({ type: 'tool_result', name: r.name, output: o });
+        }
+      }
+      assistantShell.quickReplies = shaped.quickReplies.length ? shaped.quickReplies : undefined;
       await this.sessions.saveSession(rec);
+      this.post({ type: 'sessionMessages', sessionId, messages: rec.messages });
       this.post({ type: 'streamEnd', sessionId, id: assistantId });
       this.codeLens.refresh();
     } catch (e) {
       const aborted = this.abort?.signal.aborted || (e instanceof DOMException && e.name === 'AbortError');
       if (aborted) {
-        assistantShell.parts = [{ type: 'text', text: buf ? `${buf}\n\n（已停止）` : '（已停止）' }];
+        const raw = buf ? `${buf}\n\n（已停止）` : '（已停止）';
+        const shaped = formatAssistantMessageParts(raw);
+        assistantShell.parts = shaped.parts;
+        assistantShell.quickReplies = shaped.quickReplies.length ? shaped.quickReplies : undefined;
       } else {
         const m = e instanceof Error ? e.message : String(e);
         assistantShell.parts = [{ type: 'text', text: `（错误）${m}` }];
+        assistantShell.quickReplies = undefined;
       }
       await this.sessions.saveSession(rec);
+      this.post({ type: 'sessionMessages', sessionId, messages: rec.messages });
       this.post({ type: 'streamEnd', sessionId, id: assistantId });
       this.codeLens.refresh();
     } finally {
@@ -491,6 +529,21 @@ function joinTextParts(m: ChatMessage): string {
     .filter((p) => p.type === 'text')
     .map((p) => (p as { text: string }).text)
     .join('\n');
+}
+
+/** 发给模型的助手历史：正文 + 已落库的 tool_result（工具 JSON 回包），不含 thinking / tool_trace */
+function joinAssistantApiText(m: ChatMessage): string {
+  const chunks: string[] = [];
+  for (const p of m.parts) {
+    if (p.type === 'text') chunks.push((p as { text: string }).text);
+    if (p.type === 'tool_result') {
+      const tr = p as { name: string; output: string };
+      chunks.push(
+        `\n[扩展已执行工具 ${tr.name}，返回 JSON 如下；续写时请据此推理，勿在已成功读盘时无故重复同一 read_file]\n${tr.output}\n`
+      );
+    }
+  }
+  return chunks.join('\n').trim();
 }
 
 function getNonce() {

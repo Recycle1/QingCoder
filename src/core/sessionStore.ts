@@ -7,13 +7,22 @@ export type ChatRole = 'user' | 'assistant' | 'system';
 
 export type ChatContentPart =
   | { type: 'text'; text: string }
+  | { type: 'thinking'; text: string }
+  /** 模型输出中的工具调用片段，与正文分开展示 */
+  | { type: 'tool_trace'; name: string; body: string }
+  /** 扩展实际执行工具后的 JSON 回包，写入会话供下一轮模型引用（不在模型原文中） */
+  | { type: 'tool_result'; name: string; output: string }
   | { type: 'image_url'; imageUrl: { url: string } };
+
+export type QuickReply = { label: string; payload: string };
 
 export type ChatMessage = {
   id: string;
   role: ChatRole;
   createdAt: number;
   parts: ChatContentPart[];
+  /** 助手消息：快捷按钮，点击即发送 payload 作为用户消息 */
+  quickReplies?: QuickReply[];
 };
 
 export type SessionRecord = {

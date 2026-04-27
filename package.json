@@ -68,6 +68,10 @@
       {
         "command": "qingcoder.undoFile",
         "title": "QingCoder: Undo File"
+      },
+      {
+        "command": "qingcoder.undoLastPatch",
+        "title": "QingCoder: 撤销该文件最后一次写入"
       }
     ]
   },
